@@ -7,13 +7,7 @@ Snapshots and logins are stored in **Neon Postgres**.
 
 ## Login (Neon)
 
-On first run the app creates an `app_users` table and seeds 3 demo accounts (passwords hashed):
-
-| Username | Password |
-|----------|----------|
-| `admin` | `Admin@123` |
-| `sagar` | `Sagar@123` |
-| `demo` | `Demo@123` |
+Users sign in or **create an account** (username + password). Accounts are stored in Neon `app_users` with hashed passwords. No demo credentials are shown in the UI.
 
 ## What it uses
 
@@ -76,6 +70,7 @@ Repo includes a `Dockerfile`. Create a new service from the GitHub repo and set 
 - **Dashboard** — NSE table with Direction (UP/DOWN/FLAT) + Neon status  
 - **Stocks** — one ticker: direction, why, chart, news  
 - **Analysis** — direction + model signal breakdown  
+- **Prediction** — basic grow / reduce / sideways outlook for a chosen stock  
 - **Portfolio / Transactions** — simulated orders only  
 
 ## Project layout

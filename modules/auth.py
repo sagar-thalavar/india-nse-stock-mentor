@@ -3,17 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 from typing import Any
 
 from modules.db import connection, db_configured, ensure_schema
-
-# Demo accounts seeded into Neon (passwords hashed at rest).
-DEFAULT_USERS = [
-    {"username": "admin", "password": "Admin@123", "display_name": "Admin"},
-    {"username": "sagar", "password": "Sagar@123", "display_name": "Sagar"},
-    {"username": "demo", "password": "Demo@123", "display_name": "Demo User"},
-]
 
 
 def _hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
@@ -53,27 +47,36 @@ def ensure_users_table() -> bool:
     return True
 
 
-def seed_default_users() -> int:
-    """Insert the 3 demo users if missing. Returns how many were inserted."""
+def create_user(username: str, password: str, display_name: str | None = None) -> tuple[bool, str]:
+    """Create a user in Neon. Returns (ok, message)."""
+    username = (username or "").strip().lower()
+    password = password or ""
+    display_name = (display_name or username).strip() or username
+
+    if not re.fullmatch(r"[a-z0-9_]{3,32}", username):
+        return False, "Username must be 3–32 characters (letters, numbers, underscore)."
+    if len(password) < 6:
+        return False, "Password must be at least 6 characters."
     if not ensure_users_table():
-        return 0
-    inserted = 0
-    with connection() as conn:
-        with conn.cursor() as cur:
-            for u in DEFAULT_USERS:
-                cur.execute("SELECT 1 FROM app_users WHERE username = %s", (u["username"],))
+        return False, "Database is not configured."
+
+    salt, digest = _hash_password(password)
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM app_users WHERE lower(username) = %s", (username,))
                 if cur.fetchone():
-                    continue
-                salt, digest = _hash_password(u["password"])
+                    return False, "That username is already taken."
                 cur.execute(
                     """
                     INSERT INTO app_users (username, display_name, salt, password_hash)
                     VALUES (%s, %s, %s, %s)
                     """,
-                    (u["username"], u["display_name"], salt, digest),
+                    (username, display_name, salt, digest),
                 )
-                inserted += 1
-    return inserted
+        return True, "Account created. You can sign in now."
+    except Exception as exc:
+        return False, f"Could not create user: {type(exc).__name__}"
 
 
 def authenticate(username: str, password: str) -> dict[str, Any] | None:
@@ -83,7 +86,6 @@ def authenticate(username: str, password: str) -> dict[str, Any] | None:
         return None
     if not ensure_users_table():
         return None
-    seed_default_users()
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(

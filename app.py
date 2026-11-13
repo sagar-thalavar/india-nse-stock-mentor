@@ -19,7 +19,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from modules.auth import authenticate, seed_default_users
+from modules.auth import authenticate, create_user, ensure_users_table
 from modules.bot_advisor import active_llm_provider, chat_with_bot, finnhub_market_news
 from modules.data_provider import get_market_provider
 from modules.db import db_configured, db_status, persist_analysis
@@ -992,8 +992,79 @@ def page_settings() -> None:
         st.rerun()
 
 
+def page_prediction(analyses: dict) -> None:
+    st.title("Prediction")
+    st.caption("Basic educational outlook from recent price trend + model signal — not a guarantee.")
+
+    options = {
+        f"{t} · {a.get('name', t)}": t for t, a in analyses.items()
+    }
+    if not options:
+        st.warning("No stocks loaded yet.")
+        return
+
+    choice = st.selectbox("Choose a stock", list(options.keys()), key="pred_sel")
+    ticker = options[choice]
+    a = analyses[ticker]
+    s = a.get("snapshot") or {}
+    pct = float(s.get("daily_change_pct") or 0)
+    week = s.get("week_change_pct")
+    month = s.get("month_change_pct")
+    signal = a.get("signal") or "HOLD"
+
+    # Simple rule: blend short moves + model signal into grow / reduce / sideways.
+    score = 0
+    if pct > 0.2:
+        score += 1
+    elif pct < -0.2:
+        score -= 1
+    if week is not None:
+        score += 1 if week > 0 else (-1 if week < 0 else 0)
+    if month is not None:
+        score += 1 if month > 0 else (-1 if month < 0 else 0)
+    if signal == "BUY":
+        score += 2
+    elif signal == "SELL":
+        score -= 2
+
+    if score >= 2:
+        outlook = "GROW"
+        cls = "dir-up"
+        plain = "This stock looks more likely to **grow** in the near term."
+    elif score <= -2:
+        outlook = "REDUCE"
+        cls = "dir-down"
+        plain = "This stock looks more likely to **reduce** in the near term."
+    else:
+        outlook = "SIDEWAYS"
+        cls = "dir-flat"
+        plain = "This stock looks more likely to stay **sideways / mixed** for now."
+
+    st.markdown(
+        f"""
+        <div class="{cls}" style="border-radius:14px;padding:28px 24px;text-align:center;margin:18px 0 14px;">
+          <div style="font-size:0.8rem;letter-spacing:0.14em;">BASIC PREDICTION</div>
+          <div style="font-size:2.6rem;font-weight:800;line-height:1.1;margin-top:6px;">{outlook}</div>
+          <div style="margin-top:10px;font-size:1.05rem;">{a.get('name')} ({ticker})</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(plain)
+    st.write(
+        f"Today: **{pct:+.2f}%** · "
+        f"1W: **{(week if week is not None else 0):+.2f}%** · "
+        f"1M: **{(month if month is not None else 0):+.2f}%** · "
+        f"Model signal: **{signal}**"
+    )
+    st.info(
+        "Educational only. Built from recent price moves and the app signal — "
+        "not financial advice and not a guaranteed forecast."
+    )
+
+
 def render_login_page() -> None:
-    """Full-bleed login gate before any market data loads."""
+    """Full-bleed login / create-account gate before any market data loads."""
     apply_theme("light")
     st.markdown(
         """
@@ -1008,11 +1079,11 @@ def render_login_page() -> None:
         }
         .login-shell {
           max-width: 440px;
-          margin: 4.5rem auto 2rem;
+          margin: 3.5rem auto 1rem;
           background: #ffffff;
           border: 1px solid #cfd6d2;
           border-radius: 18px;
-          padding: 2rem 1.75rem 1.5rem;
+          padding: 1.6rem 1.75rem 0.4rem;
           box-shadow: 0 18px 40px rgba(20, 32, 51, 0.08);
         }
         .login-brand {
@@ -1032,32 +1103,21 @@ def render_login_page() -> None:
         }
         .login-sub {
           color: #4b5b70;
-          margin: 0 0 1.2rem;
+          margin: 0 0 0.8rem;
           font-size: 0.98rem;
-        }
-        .login-hint {
-          margin-top: 1rem;
-          padding: 0.85rem 0.95rem;
-          background: #f3f7f5;
-          border: 1px solid #cfe0d7;
-          border-radius: 10px;
-          color: #243247;
-          font-size: 0.86rem;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # Ensure Neon users exist (idempotent).
     db_ok = db_configured()
-    seeded = 0
-    seed_error = None
+    table_error = None
     if db_ok:
         try:
-            seeded = seed_default_users()
+            ensure_users_table()
         except Exception as exc:
-            seed_error = f"{type(exc).__name__}: {exc}"
+            table_error = f"{type(exc).__name__}: {exc}"
 
     left, center, right = st.columns([1, 1.25, 1])
     with center:
@@ -1065,53 +1125,51 @@ def render_login_page() -> None:
             """
             <div class="login-shell">
               <div class="login-brand">India NSE · Mentor</div>
-              <h1 class="login-title">Sign in</h1>
-              <p class="login-sub">Use your username and password to open the live NSE workspace.</p>
+              <h1 class="login-title">Welcome</h1>
+              <p class="login-sub">Sign in or create an account to open the workspace.</p>
             </div>
             """,
             unsafe_allow_html=True,
         )
-
-        with st.form("login_form", clear_on_submit=False):
-            username = st.text_input("Username", placeholder="admin")
-            password = st.text_input("Password", type="password", placeholder="••••••••")
-            submitted = st.form_submit_button("Continue", use_container_width=True, type="primary")
 
         if not db_ok:
             st.error("DATABASE_URL is missing — add it in Streamlit Cloud → App settings → Secrets.")
-            st.code(
-                'DATABASE_URL = "postgresql://USER:PASSWORD@HOST/neondb?sslmode=require"\n'
-                'FINNHUB_API_KEY = "your_key"\n'
-                'GROQ_API_KEY = "your_key"',
-                language="toml",
-            )
             return
-        if seed_error:
-            st.error(f"Could not prepare users table: {seed_error}")
+        if table_error:
+            st.error(f"Could not prepare users table: {table_error}")
             return
-        if seeded:
-            st.info("Demo users were created in Neon.")
 
-        if submitted:
-            user = authenticate(username, password)
-            if user:
-                st.session_state["auth_user"] = user
-                st.success(f"Welcome, {user['display_name']}")
-                st.rerun()
-            else:
-                st.error("Invalid username or password.")
+        tab_login, tab_create = st.tabs(["Sign in", "Create account"])
 
-        st.markdown(
-            """
-            <div class="login-hint">
-              <b>Demo logins</b><br/>
-              admin / Admin@123<br/>
-              sagar / Sagar@123<br/>
-              demo / Demo@123
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        with tab_login:
+            with st.form("login_form", clear_on_submit=False):
+                username = st.text_input("Username", key="login_user")
+                password = st.text_input("Password", type="password", key="login_pass")
+                submitted = st.form_submit_button("Sign in", use_container_width=True, type="primary")
+            if submitted:
+                user = authenticate(username, password)
+                if user:
+                    st.session_state["auth_user"] = user
+                    st.success(f"Welcome, {user['display_name']}")
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password.")
+
+        with tab_create:
+            with st.form("create_form", clear_on_submit=False):
+                new_user = st.text_input("Choose a username", key="create_user", help="3–32 letters, numbers, underscore")
+                new_pass = st.text_input("Choose a password", type="password", key="create_pass", help="At least 6 characters")
+                new_pass2 = st.text_input("Confirm password", type="password", key="create_pass2")
+                created = st.form_submit_button("Create account", use_container_width=True, type="primary")
+            if created:
+                if new_pass != new_pass2:
+                    st.error("Passwords do not match.")
+                else:
+                    ok, msg = create_user(new_user, new_pass)
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
 
 
 def main() -> None:
@@ -1138,6 +1196,7 @@ def main() -> None:
                 "Dashboard",
                 "Stocks",
                 "Analysis",
+                "Prediction",
                 "Bot",
                 "Compare",
                 "Portfolio",
@@ -1176,6 +1235,8 @@ def main() -> None:
         page_stocks(analyses)
     elif page == "Analysis":
         page_analysis(analyses)
+    elif page == "Prediction":
+        page_prediction(analyses)
     elif page == "Bot":
         page_bot(analyses)
     elif page == "Compare":
