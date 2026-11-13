@@ -13,6 +13,7 @@ from modules.config import load_env
 load_env()
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import timedelta
 import threading
 
 import pandas as pd
@@ -992,10 +993,252 @@ def page_settings() -> None:
         st.rerun()
 
 
-def _prediction_why(outlook: str, pct: float, week, month, signal: str, news: dict, articles: list) -> list[str]:
+def _clip_f(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def _prediction_score(a: dict, peer_overalls: list[float] | None = None) -> float:
+    """Balanced continuous score. Positive = grow lean, negative = reduce lean."""
+    s = a.get("snapshot") or {}
+    m = a.get("metrics") or {}
+    news = a.get("news") or {}
+    overall = float(a.get("overall") or 50.0)
+    signal = a.get("signal") or "HOLD"
+
+    score = (overall - 50.0) / 12.0  # roughly -4..+4
+
+    pct = float(s.get("daily_change_pct") or 0.0)
+    score += _clip_f(pct / 1.2, -1.5, 1.5)
+
+    week = s.get("week_change_pct")
+    if week is not None:
+        score += _clip_f(float(week) / 2.0, -2.0, 2.0)
+
+    month = s.get("month_change_pct")
+    if month is not None:
+        score += _clip_f(float(month) / 4.0, -2.0, 2.0)
+
+    # Strong week+month up alone used to force GROW — now require quality checks.
+    rsi = float(m.get("rsi14") or 50.0)
+    if rsi >= 72:
+        score -= 2.0  # overbought → more chance to fall
+    elif rsi >= 65:
+        score -= 1.0
+    elif rsi <= 30:
+        score += 1.2  # oversold bounce possible
+    elif rsi <= 40:
+        score += 0.5
+
+    if m.get("price_gt_sma20"):
+        score += 0.4
+    else:
+        score -= 1.2
+    if m.get("sma20_gt_sma50"):
+        score += 0.3
+    else:
+        score -= 0.8
+    if m.get("price_lt_sma50"):
+        score -= 1.0
+
+    macd = float(m.get("macd") or 0.0)
+    macd_sig = float(m.get("macd_signal") or 0.0)
+    score += _clip_f((macd - macd_sig) / max(abs(macd_sig), 1.0), -1.0, 1.0)
+
+    mom = float(m.get("momentum") or 0.0)
+    score += _clip_f(mom / 3.0, -1.5, 1.5)
+
+    news_score = float(news.get("score") or 0.0)
+    score += news_score * 1.4
+
+    if signal == "BUY":
+        score += 0.6
+    elif signal == "SELL":
+        score -= 0.6
+
+    # Rank vs peers so weaker names can show REDUCE even in a bull tape.
+    if peer_overalls and len(peer_overalls) >= 3:
+        sorted_p = sorted(peer_overalls)
+        # Approximate percentile of this stock's overall among peers.
+        below = sum(1 for x in sorted_p if x < overall)
+        pctile = below / max(len(sorted_p) - 1, 1)
+        if pctile <= 0.33:
+            score -= 1.4
+        elif pctile >= 0.67:
+            score += 0.5
+
+    return score
+
+
+def _outlook_from_score(score: float) -> tuple[str, str, str]:
+    # Wider middle band so not every mild-up day becomes GROW.
+    if score >= 2.0:
+        return (
+            "GROW",
+            "dir-up",
+            "For this stock, our basic view is: it may **grow** (price could go up).",
+        )
+    if score <= -1.2:
+        return (
+            "REDUCE",
+            "dir-down",
+            "For this stock, our basic view is: it may **reduce** (price could go down).",
+        )
+    return (
+        "SIDEWAYS",
+        "dir-flat",
+        "For this stock, our basic view is: it may stay **sideways** (no clear up or down).",
+    )
+
+
+def _build_forecast(a: dict, lean_score: float) -> dict:
+    """Educational price path: next day / week / month / year from recent drift + lean."""
+    hist = a.get("history")
+    s = a.get("snapshot") or {}
+    news = a.get("news") or {}
+    signal = a.get("signal") or "HOLD"
+
+    if hist is None or getattr(hist, "empty", True):
+        last = float(s.get("current_price") or 0)
+        last_date = pd.Timestamp.utcnow().normalize()
+        mu, sigma = 0.0, 0.015
+    else:
+        close = hist["close"].astype(float)
+        last = float(close.iloc[-1])
+        last_date = pd.to_datetime(hist["date"].iloc[-1])
+        rets = close.pct_change().dropna()
+        recent = rets.tail(21)
+        mu = float(recent.mean()) if len(recent) else 0.0
+        sigma = float(recent.std()) if len(recent) > 2 else 0.015
+
+    bias = _clip_f(lean_score * 0.00045, -0.004, 0.004)
+    if signal == "BUY":
+        bias += 0.0004
+    elif signal == "SELL":
+        bias -= 0.0004
+    bias += float(news.get("score") or 0.0) * 0.0006
+    mu_adj = _clip_f(mu + bias, -0.025, 0.025)
+
+    horizons = [
+        ("Next day", 1, 0.07),
+        ("Next week", 5, 0.14),
+        ("Next month", 21, 0.28),
+        ("Next year", 252, 0.75),
+    ]
+    out: dict = {"last": last, "last_date": last_date, "points": []}
+    for label, days, max_move in horizons:
+        # Longer horizons use a dampened daily drift so the line does not explode.
+        damp = 1.0 / (1.0 + days / 55.0)
+        drift = mu_adj * damp
+        pred = last * ((1.0 + drift) ** days)
+        pred = _clip_f(pred, last * (1.0 - max_move), last * (1.0 + max_move))
+        band = sigma * (days ** 0.5) * 0.85
+        lo = pred * (1.0 - band)
+        hi = pred * (1.0 + band)
+        cal_days = int(round(days * 1.4))  # trading days → calendar-ish
+        out["points"].append(
+            {
+                "label": label,
+                "days": days,
+                "date": last_date + timedelta(days=max(cal_days, 1)),
+                "price": pred,
+                "low": max(0.0, lo),
+                "high": hi,
+                "pct": (pred / last - 1.0) * 100.0 if last else 0.0,
+            }
+        )
+    return out
+
+
+def _prediction_chart(hist: pd.DataFrame, forecast: dict, ticker: str, lookback: str = "3M") -> go.Figure:
+    market = get_market_provider()
+    try:
+        sl = market.slice_range(ticker, lookback)
+    except Exception:
+        sl = hist
+    if sl is None or getattr(sl, "empty", True):
+        sl = hist
+    fig = go.Figure()
+    if sl is not None and not getattr(sl, "empty", True):
+        fig.add_trace(
+            go.Scatter(
+                x=pd.to_datetime(sl["date"]),
+                y=sl["close"].astype(float),
+                name="Past price",
+                mode="lines",
+                line=dict(width=2.2, color="#2563eb"),
+            )
+        )
+
+    last = float(forecast.get("last") or 0)
+    last_date = pd.to_datetime(forecast.get("last_date"))
+    points = forecast.get("points") or []
+    fx = [last_date] + [pd.to_datetime(p["date"]) for p in points]
+    fy = [last] + [float(p["price"]) for p in points]
+    flo = [last] + [float(p["low"]) for p in points]
+    fhi = [last] + [float(p["high"]) for p in points]
+
+    fig.add_trace(
+        go.Scatter(
+            x=fx + fx[::-1],
+            y=fhi + flo[::-1],
+            fill="toself",
+            fillcolor="rgba(245, 158, 11, 0.18)",
+            line=dict(color="rgba(0,0,0,0)"),
+            hoverinfo="skip",
+            name="Uncertainty band",
+            showlegend=True,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=fx,
+            y=fy,
+            name="Predicted path",
+            mode="lines+markers",
+            line=dict(width=2.6, color="#d97706", dash="dash"),
+            marker=dict(size=9, symbol="diamond"),
+        )
+    )
+    for p in points:
+        fig.add_annotation(
+            x=pd.to_datetime(p["date"]),
+            y=float(p["price"]),
+            text=f"{p['label']}<br>{p['pct']:+.1f}%",
+            showarrow=True,
+            arrowhead=2,
+            ax=0,
+            ay=-36,
+            font=dict(size=11),
+        )
+
+    theme = "plotly_dark" if load_settings().get("theme", "light") == "dark" else "plotly_white"
+    fig.update_layout(
+        height=460,
+        margin=dict(l=10, r=10, t=36, b=10),
+        template=theme,
+        legend=dict(orientation="h"),
+        yaxis_title="Price (₹)",
+        title=f"{ticker} — past price + predicted next day / week / month / year",
+    )
+    return fig
+
+
+def _prediction_why(
+    outlook: str,
+    pct: float,
+    week,
+    month,
+    signal: str,
+    news: dict,
+    articles: list,
+    lean_score: float,
+    metrics: dict,
+    forecasts: list,
+) -> list[str]:
     """Simple English reasons for grow / reduce / sideways."""
     reasons: list[str] = []
     name_tone = (news or {}).get("label", "Neutral")
+    rsi = float((metrics or {}).get("rsi14") or 50.0)
 
     if pct > 0.2:
         reasons.append(f"Today the price went up ({pct:+.2f}%). That is a short-term positive sign.")
@@ -1020,6 +1263,18 @@ def _prediction_why(outlook: str, pct: float, week, month, signal: str, news: di
         else:
             reasons.append("Over the last month the price is roughly flat.")
 
+    if rsi >= 70:
+        reasons.append(f"RSI is high ({rsi:.0f}). The stock looks a bit stretched / expensive short-term, so a drop is more possible.")
+    elif rsi <= 35:
+        reasons.append(f"RSI is low ({rsi:.0f}). The stock looks a bit beaten-down short-term, so a bounce is more possible.")
+    else:
+        reasons.append(f"RSI is in a middle zone ({rsi:.0f}), so momentum is not extreme.")
+
+    if not (metrics or {}).get("price_gt_sma20"):
+        reasons.append("Price is below the 20-day average. That is a short-term weak sign.")
+    if (metrics or {}).get("price_lt_sma50"):
+        reasons.append("Price is also below the 50-day average. That adds pressure for a reduce view.")
+
     if signal == "BUY":
         reasons.append("Our simple model signal is BUY, which supports a growth outlook.")
     elif signal == "SELL":
@@ -1039,19 +1294,33 @@ def _prediction_why(outlook: str, pct: float, week, month, signal: str, news: di
         if top:
             reasons.append(f"One recent headline people are reading: “{top}”.")
 
-    if outlook == "GROW":
-        reasons.append("Putting this together, the stock looks more likely to grow soon — but this is only a basic educational guess.")
-    elif outlook == "REDUCE":
-        reasons.append("Putting this together, the stock looks more likely to reduce soon — but this is only a basic educational guess.")
+    if forecasts:
+        bits = [f"{p['label'].lower()} {p['pct']:+.1f}%" for p in forecasts]
+        reasons.append("Our simple forecast path is roughly: " + "; ".join(bits) + ".")
+
+    if lean_score >= 2.0:
+        reasons.append("Putting the checks together, the lean score is clearly positive — so we say GROW.")
+    elif lean_score <= -1.2:
+        reasons.append("Putting the checks together, the lean score is clearly negative — so we say REDUCE.")
     else:
-        reasons.append("Putting this together, the stock looks mixed / sideways for now — wait for a clearer move.")
+        reasons.append("Putting the checks together, the lean score is near the middle — so we say SIDEWAYS.")
+
+    if outlook == "GROW":
+        reasons.append("Still educational only: the real market can move the other way.")
+    elif outlook == "REDUCE":
+        reasons.append("Still educational only: a weak lean does not guarantee a fall.")
+    else:
+        reasons.append("Still educational only: wait for a clearer move before acting.")
 
     return reasons
 
 
 def page_prediction(analyses: dict) -> None:
     st.title("Prediction")
-    st.caption("Pick a stock. See grow / reduce, a simple why, the chart, and recent news. Educational only.")
+    st.caption(
+        "Pick a stock. See grow / reduce / sideways, a simple why, a forecast chart "
+        "(next day · week · month · year), and recent news. Educational only."
+    )
 
     options = {
         f"{t} · {a.get('name', t)}": t for t, a in analyses.items()
@@ -1067,6 +1336,10 @@ def page_prediction(analyses: dict) -> None:
         a = enrich_analysis_with_news(analyses[ticker])
         analyses[ticker] = a
 
+    peer_overalls = [float(x.get("overall") or 50.0) for x in analyses.values()]
+    lean = _prediction_score(a, peer_overalls)
+    outlook, cls, plain = _outlook_from_score(lean)
+
     s = a.get("snapshot") or {}
     pct = float(s.get("daily_change_pct") or 0)
     week = s.get("week_change_pct")
@@ -1075,43 +1348,8 @@ def page_prediction(analyses: dict) -> None:
     news = a.get("news") or {}
     articles = a.get("articles") or []
     m = a.get("metrics") or {}
-
-    # Simple rule: blend short moves + model signal + news into grow / reduce / sideways.
-    score = 0
-    if pct > 0.2:
-        score += 1
-    elif pct < -0.2:
-        score -= 1
-    if week is not None:
-        score += 1 if week > 0 else (-1 if week < 0 else 0)
-    if month is not None:
-        score += 1 if month > 0 else (-1 if month < 0 else 0)
-    if signal == "BUY":
-        score += 2
-    elif signal == "SELL":
-        score -= 2
-    news_score = float(news.get("score") or 0)
-    if news_score > 0.15:
-        score += 1
-    elif news_score < -0.15:
-        score -= 1
-    if m.get("price_gt_sma20"):
-        score += 1
-    if m.get("price_lt_sma50"):
-        score -= 1
-
-    if score >= 2:
-        outlook = "GROW"
-        cls = "dir-up"
-        plain = "For this stock, our basic view is: it may **grow** (price could go up)."
-    elif score <= -2:
-        outlook = "REDUCE"
-        cls = "dir-down"
-        plain = "For this stock, our basic view is: it may **reduce** (price could go down)."
-    else:
-        outlook = "SIDEWAYS"
-        cls = "dir-flat"
-        plain = "For this stock, our basic view is: it may stay **sideways** (no clear up or down)."
+    forecast = _build_forecast(a, lean)
+    points = forecast.get("points") or []
 
     st.markdown(
         f"""
@@ -1119,6 +1357,7 @@ def page_prediction(analyses: dict) -> None:
           <div style="font-size:0.8rem;letter-spacing:0.14em;">BASIC PREDICTION</div>
           <div style="font-size:2.6rem;font-weight:800;line-height:1.1;margin-top:6px;">{outlook}</div>
           <div style="margin-top:10px;font-size:1.05rem;">{a.get('name')} ({ticker})</div>
+          <div style="margin-top:8px;opacity:0.85;font-size:0.95rem;">Lean score {lean:+.2f} (positive = grow, negative = reduce)</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1129,16 +1368,37 @@ def page_prediction(analyses: dict) -> None:
         f"Today: **{pct:+.2f}%** · "
         f"1W: **{(week if week is not None else 0):+.2f}%** · "
         f"1M: **{(month if month is not None else 0):+.2f}%** · "
+        f"RSI: **{float(m.get('rsi14') or 0):.0f}** · "
         f"Model: **{signal}** · News: **{news.get('label', 'Neutral')}**"
     )
 
+    st.markdown("### Forecast targets")
+    cols = st.columns(4)
+    for col, p in zip(cols, points):
+        with col:
+            direction = "up" if p["pct"] > 0.15 else ("down" if p["pct"] < -0.15 else "flat")
+            col.metric(
+                p["label"],
+                inr(p["price"], 2),
+                f"{p['pct']:+.2f}% · {direction}",
+            )
+
     st.markdown("### Why, in simple English")
-    for line in _prediction_why(outlook, pct, week, month, signal, news, articles):
+    for line in _prediction_why(
+        outlook, pct, week, month, signal, news, articles, lean, m, points
+    ):
         st.write(f"- {line}")
 
-    st.markdown("### Price chart")
-    period = st.radio("Chart range", ["1M", "3M", "6M", "1Y"], horizontal=True, index=1, key="pred_ch")
-    st.plotly_chart(price_chart(a.get("history"), period, ticker), use_container_width=True)
+    st.markdown("### Prediction chart")
+    lookback = st.radio("Past range on chart", ["1M", "3M", "6M", "1Y"], horizontal=True, index=1, key="pred_ch")
+    st.plotly_chart(
+        _prediction_chart(a.get("history"), forecast, ticker, lookback),
+        use_container_width=True,
+    )
+    st.caption(
+        "Orange dashed line = educational guess for next day, week, month, and year. "
+        "Shaded band = rough uncertainty from recent volatility — not a guarantee."
+    )
 
     st.markdown("### News linked to this stock")
     if not articles:
@@ -1157,8 +1417,8 @@ def page_prediction(analyses: dict) -> None:
                 st.caption(str(n.get("summary"))[:220])
 
     st.info(
-        "Educational only. This is a basic guess from price trend + news + a simple model. "
-        "It is not financial advice and the market can still move the other way."
+        "Educational only. GROW / REDUCE and the forecast line are basic guesses from "
+        "price trend, RSI, peer rank, news tone, and a simple model. Not financial advice."
     )
 
 
