@@ -76,7 +76,32 @@ def signed_inr(value: float) -> str:
     return prefix + inr(value)
 
 
+def hide_host_chrome() -> None:
+    """Hide Streamlit menu/footer/deploy controls as much as the host allows."""
+    st.markdown(
+        """
+        <style>
+        #MainMenu { visibility: hidden !important; }
+        header[data-testid="stHeader"] { background: transparent !important; }
+        div[data-testid="stToolbar"] { display: none !important; }
+        .stDeployButton, div[data-testid="stAppDeployButton"] { display: none !important; }
+        footer { visibility: hidden !important; height: 0 !important; }
+        a[href*="streamlit.io"] { display: none !important; }
+        a[href*="share.streamlit.io"] { display: none !important; }
+        div[data-testid="stStatusWidget"] { display: none !important; }
+        /* Cloud viewer badge / profile chip (best-effort; host may still inject) */
+        [data-testid="stDecoration"] { display: none !important; }
+        .viewerBadge_container__1QSob,
+        .viewerBadge_link__1SLeV,
+        .viewerBadge_text__1JaDK { display: none !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def apply_theme(theme: str) -> None:
+    hide_host_chrome()
     # High-contrast slate palette so Streamlit text never blends into the page.
     if theme == "light":
         st.markdown(
@@ -1053,7 +1078,13 @@ def render_login_page() -> None:
             submitted = st.form_submit_button("Continue", use_container_width=True, type="primary")
 
         if not db_ok:
-            st.error("DATABASE_URL is missing — login needs Neon.")
+            st.error("DATABASE_URL is missing — add it in Streamlit Cloud → App settings → Secrets.")
+            st.code(
+                'DATABASE_URL = "postgresql://USER:PASSWORD@HOST/neondb?sslmode=require"\n'
+                'FINNHUB_API_KEY = "your_key"\n'
+                'GROQ_API_KEY = "your_key"',
+                language="toml",
+            )
             return
         if seed_error:
             st.error(f"Could not prepare users table: {seed_error}")
