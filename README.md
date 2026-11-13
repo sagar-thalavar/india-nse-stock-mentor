@@ -48,7 +48,28 @@ python -m streamlit run app.py
 
 Open `http://localhost:8501`, sign in, then use the app.
 
-**Note:** Streamlit is not a natural fit for Vercel (serverless). Prefer Streamlit Community Cloud, Railway, or Render for hosting; we can still keep the code on GitHub.
+## Deploy (important: not Vercel)
+
+This is a **Streamlit** app. Vercel’s Python runtime expects a FastAPI/Flask entrypoint (`app` / `handler`), so you get:
+
+`PYTHON_ENTRYPOINT_NOT_FOUND … app.py does not export app/application/handler`
+
+**Use one of these instead:**
+
+### A) Streamlit Community Cloud (easiest)
+
+1. Go to [share.streamlit.io](https://share.streamlit.io)
+2. New app → repo `sagar-thalavar/india-nse-stock-mentor` → `main` → `app.py`
+3. In **Secrets**, paste TOML like `.streamlit/secrets.toml.example`
+4. Deploy
+
+### B) Railway / Render (Docker)
+
+Repo includes a `Dockerfile`. Create a new service from the GitHub repo and set env vars:
+
+- `DATABASE_URL`
+- `FINNHUB_API_KEY`
+- `GROQ_API_KEY`
 
 ## Pages
 
