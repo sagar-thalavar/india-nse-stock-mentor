@@ -1,0 +1,23 @@
+[
+  {
+    "ticker": "RELIANCE.NS",
+    "name": "Reliance Industries",
+    "sector": "Energy",
+    "current_price": 0,
+    "exchange": "NSE"
+  },
+  {
+    "ticker": "TCS.NS",
+    "name": "Tata Consultancy Services",
+    "sector": "Technology",
+    "current_price": 0,
+    "exchange": "NSE"
+  },
+  {
+    "ticker": "INFY.NS",
+    "name": "Infosys",
+    "sector": "Technology",
+    "current_price": 0,
+    "exchange": "NSE"
+  }
+]

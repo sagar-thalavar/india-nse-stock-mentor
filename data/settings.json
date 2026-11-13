@@ -1,0 +1,20 @@
+{
+  "initial_cash": 1000000,
+  "buy_threshold": 70,
+  "hold_low": 45,
+  "sell_threshold": 44,
+  "technical_weight": 0.5,
+  "momentum_weight": 0.2,
+  "news_weight": 0.2,
+  "volume_weight": 0.1,
+  "tech_score_buy": 4,
+  "tech_score_hold_low": 1,
+  "alert_percentage": 2.0,
+  "theme": "light",
+  "watchlist": [
+    "RELIANCE.NS",
+    "TCS.NS",
+    "INFY.NS"
+  ],
+  "price_alerts": {}
+}
