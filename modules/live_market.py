@@ -17,6 +17,15 @@ DEFAULT_NSE_WATCHLIST = [
     {"ticker": "RELIANCE.NS", "name": "Reliance Industries", "sector": "Energy"},
     {"ticker": "TCS.NS", "name": "Tata Consultancy Services", "sector": "Technology"},
     {"ticker": "INFY.NS", "name": "Infosys", "sector": "Technology"},
+    {"ticker": "HDFCBANK.NS", "name": "HDFC Bank", "sector": "Banking"},
+    {"ticker": "ICICIBANK.NS", "name": "ICICI Bank", "sector": "Banking"},
+    {"ticker": "SBIN.NS", "name": "State Bank of India", "sector": "Banking"},
+    {"ticker": "BHARTIARTL.NS", "name": "Bharti Airtel", "sector": "Telecom"},
+    {"ticker": "ITC.NS", "name": "ITC", "sector": "FMCG"},
+    {"ticker": "LT.NS", "name": "Larsen & Toubro", "sector": "Infrastructure"},
+    {"ticker": "WIPRO.NS", "name": "Wipro", "sector": "Technology"},
+    {"ticker": "AXISBANK.NS", "name": "Axis Bank", "sector": "Banking"},
+    {"ticker": "MARUTI.NS", "name": "Maruti Suzuki", "sector": "Automobile"},
 ]
 
 

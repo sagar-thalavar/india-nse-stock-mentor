@@ -19,5 +19,68 @@
     "sector": "Technology",
     "current_price": 0,
     "exchange": "NSE"
+  },
+  {
+    "ticker": "HDFCBANK.NS",
+    "name": "HDFC Bank",
+    "sector": "Banking",
+    "current_price": 0,
+    "exchange": "NSE"
+  },
+  {
+    "ticker": "ICICIBANK.NS",
+    "name": "ICICI Bank",
+    "sector": "Banking",
+    "current_price": 0,
+    "exchange": "NSE"
+  },
+  {
+    "ticker": "SBIN.NS",
+    "name": "State Bank of India",
+    "sector": "Banking",
+    "current_price": 0,
+    "exchange": "NSE"
+  },
+  {
+    "ticker": "BHARTIARTL.NS",
+    "name": "Bharti Airtel",
+    "sector": "Telecom",
+    "current_price": 0,
+    "exchange": "NSE"
+  },
+  {
+    "ticker": "ITC.NS",
+    "name": "ITC",
+    "sector": "FMCG",
+    "current_price": 0,
+    "exchange": "NSE"
+  },
+  {
+    "ticker": "LT.NS",
+    "name": "Larsen & Toubro",
+    "sector": "Infrastructure",
+    "current_price": 0,
+    "exchange": "NSE"
+  },
+  {
+    "ticker": "WIPRO.NS",
+    "name": "Wipro",
+    "sector": "Technology",
+    "current_price": 0,
+    "exchange": "NSE"
+  },
+  {
+    "ticker": "AXISBANK.NS",
+    "name": "Axis Bank",
+    "sector": "Banking",
+    "current_price": 0,
+    "exchange": "NSE"
+  },
+  {
+    "ticker": "MARUTI.NS",
+    "name": "Maruti Suzuki",
+    "sector": "Automobile",
+    "current_price": 0,
+    "exchange": "NSE"
   }
 ]

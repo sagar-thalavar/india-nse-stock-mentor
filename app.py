@@ -992,27 +992,91 @@ def page_settings() -> None:
         st.rerun()
 
 
+def _prediction_why(outlook: str, pct: float, week, month, signal: str, news: dict, articles: list) -> list[str]:
+    """Simple English reasons for grow / reduce / sideways."""
+    reasons: list[str] = []
+    name_tone = (news or {}).get("label", "Neutral")
+
+    if pct > 0.2:
+        reasons.append(f"Today the price went up ({pct:+.2f}%). That is a short-term positive sign.")
+    elif pct < -0.2:
+        reasons.append(f"Today the price went down ({pct:+.2f}%). That is a short-term negative sign.")
+    else:
+        reasons.append(f"Today the price barely moved ({pct:+.2f}%). So today alone does not push strongly either way.")
+
+    if week is not None:
+        if week > 0:
+            reasons.append(f"Over the last week it rose about {week:+.2f}%. Recent buyers look a bit stronger.")
+        elif week < 0:
+            reasons.append(f"Over the last week it fell about {week:+.2f}%. Recent sellers look a bit stronger.")
+        else:
+            reasons.append("Over the last week the price was almost flat.")
+
+    if month is not None:
+        if month > 0:
+            reasons.append(f"Over the last month it is still up about {month:+.2f}%. The medium trend is helpful.")
+        elif month < 0:
+            reasons.append(f"Over the last month it is down about {month:+.2f}%. The medium trend is weak.")
+        else:
+            reasons.append("Over the last month the price is roughly flat.")
+
+    if signal == "BUY":
+        reasons.append("Our simple model signal is BUY, which supports a growth outlook.")
+    elif signal == "SELL":
+        reasons.append("Our simple model signal is SELL, which supports a reduce outlook.")
+    else:
+        reasons.append("Our simple model signal is HOLD, which means wait-and-watch.")
+
+    if name_tone == "Positive":
+        reasons.append("Recent news tone looks mostly positive, which can support the price.")
+    elif name_tone == "Negative":
+        reasons.append("Recent news tone looks mostly negative, which can pressure the price.")
+    else:
+        reasons.append("Recent news tone looks mixed or neutral.")
+
+    if articles:
+        top = articles[0].get("headline") or ""
+        if top:
+            reasons.append(f"One recent headline people are reading: “{top}”.")
+
+    if outlook == "GROW":
+        reasons.append("Putting this together, the stock looks more likely to grow soon — but this is only a basic educational guess.")
+    elif outlook == "REDUCE":
+        reasons.append("Putting this together, the stock looks more likely to reduce soon — but this is only a basic educational guess.")
+    else:
+        reasons.append("Putting this together, the stock looks mixed / sideways for now — wait for a clearer move.")
+
+    return reasons
+
+
 def page_prediction(analyses: dict) -> None:
     st.title("Prediction")
-    st.caption("Basic educational outlook from recent price trend + model signal — not a guarantee.")
+    st.caption("Pick a stock. See grow / reduce, a simple why, the chart, and recent news. Educational only.")
 
     options = {
         f"{t} · {a.get('name', t)}": t for t, a in analyses.items()
     }
     if not options:
-        st.warning("No stocks loaded yet.")
+        st.warning("No stocks loaded yet. Click **Refresh prices** in the sidebar.")
         return
 
     choice = st.selectbox("Choose a stock", list(options.keys()), key="pred_sel")
     ticker = options[choice]
-    a = analyses[ticker]
+
+    with st.spinner("Loading news for this prediction…"):
+        a = enrich_analysis_with_news(analyses[ticker])
+        analyses[ticker] = a
+
     s = a.get("snapshot") or {}
     pct = float(s.get("daily_change_pct") or 0)
     week = s.get("week_change_pct")
     month = s.get("month_change_pct")
     signal = a.get("signal") or "HOLD"
+    news = a.get("news") or {}
+    articles = a.get("articles") or []
+    m = a.get("metrics") or {}
 
-    # Simple rule: blend short moves + model signal into grow / reduce / sideways.
+    # Simple rule: blend short moves + model signal + news into grow / reduce / sideways.
     score = 0
     if pct > 0.2:
         score += 1
@@ -1026,19 +1090,28 @@ def page_prediction(analyses: dict) -> None:
         score += 2
     elif signal == "SELL":
         score -= 2
+    news_score = float(news.get("score") or 0)
+    if news_score > 0.15:
+        score += 1
+    elif news_score < -0.15:
+        score -= 1
+    if m.get("price_gt_sma20"):
+        score += 1
+    if m.get("price_lt_sma50"):
+        score -= 1
 
     if score >= 2:
         outlook = "GROW"
         cls = "dir-up"
-        plain = "This stock looks more likely to **grow** in the near term."
+        plain = "For this stock, our basic view is: it may **grow** (price could go up)."
     elif score <= -2:
         outlook = "REDUCE"
         cls = "dir-down"
-        plain = "This stock looks more likely to **reduce** in the near term."
+        plain = "For this stock, our basic view is: it may **reduce** (price could go down)."
     else:
         outlook = "SIDEWAYS"
         cls = "dir-flat"
-        plain = "This stock looks more likely to stay **sideways / mixed** for now."
+        plain = "For this stock, our basic view is: it may stay **sideways** (no clear up or down)."
 
     st.markdown(
         f"""
@@ -1052,14 +1125,40 @@ def page_prediction(analyses: dict) -> None:
     )
     st.markdown(plain)
     st.write(
+        f"Price: **{inr(s.get('current_price'), 2)}** · "
         f"Today: **{pct:+.2f}%** · "
         f"1W: **{(week if week is not None else 0):+.2f}%** · "
         f"1M: **{(month if month is not None else 0):+.2f}%** · "
-        f"Model signal: **{signal}**"
+        f"Model: **{signal}** · News: **{news.get('label', 'Neutral')}**"
     )
+
+    st.markdown("### Why, in simple English")
+    for line in _prediction_why(outlook, pct, week, month, signal, news, articles):
+        st.write(f"- {line}")
+
+    st.markdown("### Price chart")
+    period = st.radio("Chart range", ["1M", "3M", "6M", "1Y"], horizontal=True, index=1, key="pred_ch")
+    st.plotly_chart(price_chart(a.get("history"), period, ticker), use_container_width=True)
+
+    st.markdown("### News linked to this stock")
+    if not articles:
+        st.write("No recent headlines found for this stock right now.")
+    else:
+        for n in articles[:6]:
+            url = n.get("url")
+            head = n.get("headline") or ""
+            date = n.get("date") or ""
+            tone = n.get("sentiment") or "neutral"
+            if url:
+                st.markdown(f"- **{date}** · [{head}]({url}) · _{tone}_")
+            else:
+                st.markdown(f"- **{date}** · {head} · _{tone}_")
+            if n.get("summary"):
+                st.caption(str(n.get("summary"))[:220])
+
     st.info(
-        "Educational only. Built from recent price moves and the app signal — "
-        "not financial advice and not a guaranteed forecast."
+        "Educational only. This is a basic guess from price trend + news + a simple model. "
+        "It is not financial advice and the market can still move the other way."
     )
 
 
